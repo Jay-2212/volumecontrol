@@ -108,8 +108,43 @@ function createGainNode() {
     applyState();
 }
 
+function isDRMProtected(element) {
+    return !!(element.mediaKeys || element.webkitMediaKeys || element.dataset.vcDrm === 'true');
+}
+
+function watchForDRM(element) {
+    if (element.dataset.vcDrmWatch === 'true') return;
+    element.dataset.vcDrmWatch = 'true';
+    element.addEventListener('encrypted', () => {
+        element.dataset.vcDrm = 'true';
+        // If we already hooked this element via WebAudio, sever the gain-node path and
+        // restore a direct connection to destination so the DRM pipeline is not disrupted.
+        if (element.dataset.vcHooked === 'true' && element.__vc_source && tc.vars.audioCtx) {
+            try {
+                // Disconnect from the gain node first to avoid dual-routing audio.
+                try { element.__vc_source.disconnect(tc.vars.gainNode); } catch (_) {}
+                element.__vc_source.connect(tc.vars.audioCtx.destination);
+                log('DRM detected on hooked element; restored direct audio connection', 2);
+            } catch (e) {
+                log(`DRM cleanup failed: ${e && e.message}`, 2);
+            }
+        }
+        log('Encrypted media detected; DRM protection active on element', 3);
+    }, { once: true });
+}
+
 function connectOutput(element) {
     if (element.dataset.vcHooked === "true") return;
+
+    // Register DRM watcher before any attempt to hook, so the encrypted event
+    // is caught even if it fires during or after src assignment.
+    watchForDRM(element);
+
+    // Skip DRM-protected elements entirely to avoid disrupting the EME/DRM pipeline.
+    if (isDRMProtected(element)) {
+        log(`Skipping DRM-protected element: ${element.tagName} id=${element.id || ''}`, 3);
+        return;
+    }
 
     if (!tc.vars.audioCtx) {
         tc.vars.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -146,6 +181,9 @@ function connectOutput(element) {
             source.connect(tc.vars.gainNode);
             tc.vars.gainNode.connect(tc.vars.audioCtx.destination);
 
+            // Store source node so the encrypted event handler can restore direct
+            // playback if DRM kicks in after the hook was set up.
+            element.__vc_source = source;
             element.dataset.vcHooked = "true";
             // Remove any fallback adjustments we may have made earlier
             if (element.dataset.vcFallback === 'true') {
@@ -162,24 +200,27 @@ function connectOutput(element) {
             else element.style.border = "";
             log("Hook Success!", 4);
         } else {
-            // Fallback: if we can't create an audio node, adjust element.volume directly so user notices changes
-            if (element.dataset.vcFallback !== 'true') {
+            // Fallback: if we can't create an audio node, adjust element.volume directly so user notices changes.
+            // Only apply fallback if the element is not DRM-protected (re-check in case encrypted fired synchronously).
+            if (!isDRMProtected(element)) {
+                if (element.dataset.vcFallback !== 'true') {
+                    try {
+                        element.__vc_originalVolume = element.volume;
+                    } catch (e) {}
+                    element.dataset.vcFallback = 'true';
+                }
+                // Apply current state to fallback element
                 try {
-                    element.__vc_originalVolume = element.volume;
-                } catch (e) {}
-                element.dataset.vcFallback = 'true';
+                    const gain = getGainValue(tc.vars.dB);
+                    // map gain to 0..1 for element.volume (best-effort)
+                    const newVol = Math.min(1, Math.max(0, gain));
+                    element.volume = newVol;
+                    if (tc.settings.debugMode) element.style.border = "2px dashed #ffa500";
+                } catch (e) {
+                    log(`Fallback volume set failed: ${e && e.message}`, 2);
+                }
+                log("Hook fallback applied (element.volume scaled)", 3);
             }
-            // Apply current state to fallback element
-            try {
-                const gain = getGainValue(tc.vars.dB);
-                // map gain to 0..1 for element.volume (best-effort)
-                const newVol = Math.min(1, Math.max(0, gain));
-                element.volume = newVol;
-                if (tc.settings.debugMode) element.style.border = "2px dashed #ffa500";
-            } catch (e) {
-                log(`Fallback volume set failed: ${e && e.message}`, 2);
-            }
-            log("Hook fallback applied (element.volume scaled)", 3);
         }
 
     } catch (e) {
@@ -191,19 +232,32 @@ function connectOutput(element) {
 function init() {
     if (document.body.classList.contains("vc-init")) return;
 
-    for (const el of document.querySelectorAll("audio, video")) connectOutput(el);
+    for (const el of document.querySelectorAll("audio, video")) {
+        watchForDRM(el);
+        connectOutput(el);
+    }
 
     new MutationObserver(mutations => {
         for (const m of mutations) {
             for (const n of m.addedNodes) {
                 if (n.nodeType === 1) {
-                    if (n.tagName === 'AUDIO' || n.tagName === 'VIDEO') connectOutput(n);
-                    else if (n.querySelectorAll) for (const el of n.querySelectorAll('audio, video')) connectOutput(el);
+                    if (n.tagName === 'AUDIO' || n.tagName === 'VIDEO') {
+                        watchForDRM(n);
+                        connectOutput(n);
+                    } else if (n.querySelectorAll) {
+                        for (const el of n.querySelectorAll('audio, video')) {
+                            watchForDRM(el);
+                            connectOutput(el);
+                        }
+                    }
 
                     // Also check for media elements inside shadow roots (YouTube may use shadow DOM-ish patterns)
                     try {
                         if (n.shadowRoot && n.shadowRoot.querySelectorAll) {
-                            for (const el of n.shadowRoot.querySelectorAll('audio, video')) connectOutput(el);
+                            for (const el of n.shadowRoot.querySelectorAll('audio, video')) {
+                                watchForDRM(el);
+                                connectOutput(el);
+                            }
                         }
                     } catch (e) {}
                 }
@@ -271,6 +325,7 @@ function start() {
         // was previously blocked and is now allowed — ensure a gain node/source gets created.
         try {
             for (const el of document.querySelectorAll('audio, video')) {
+                watchForDRM(el);
                 connectOutput(el);
             }
         } catch (e) {
@@ -311,7 +366,10 @@ if (browserAPI && browserAPI.storage && browserAPI.storage.onChanged) {
                     // Ensure audio nodes exist for any existing media elements
                     try {
                         init();
-                        for (const el of document.querySelectorAll('audio, video')) connectOutput(el);
+                        for (const el of document.querySelectorAll('audio, video')) {
+                            watchForDRM(el);
+                            connectOutput(el);
+                        }
                         if (tc.vars.audioCtx && tc.vars.audioCtx.state === 'suspended') tc.vars.audioCtx.resume().then(applyState);
                     } catch (e) {
                         if (tc.settings.debugMode) log(`re-hook after siteSettings failed: ${e.message}`, 3);

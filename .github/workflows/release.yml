@@ -16,6 +16,28 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Validate extension files
+        run: |
+          # Validate manifest.json is valid JSON
+          python3 -c "import json; json.load(open('manifest.json'))" || exit 1
+          echo "✓ manifest.json is valid JSON"
+
+          # Check that all critical files exist
+          for file in manifest.json cs.js popup.html popup.js popup.css options.html options.js options.css ico.svg; do
+            if [ ! -f "$file" ]; then
+              echo "ERROR: Required file missing: $file"
+              exit 1
+            fi
+          done
+          echo "✓ All required files present"
+
+          # Check lib directory exists
+          if [ ! -d "lib" ]; then
+            echo "ERROR: lib directory missing"
+            exit 1
+          fi
+          echo "✓ lib directory present"
+
       - name: Get version from manifest
         id: version
         run: |
@@ -36,17 +58,8 @@ jobs:
       - name: Package extension as ZIP
         run: |
           mkdir -p dist
-          zip -r dist/volume-control-${{ steps.version.outputs.version }}.zip \
-            manifest.json \
-            cs.js \
-            popup.html \
-            popup.js \
-            popup.css \
-            options.html \
-            options.js \
-            options.css \
-            ico.svg \
-            lib/
+          zip -r dist/volume-control-${{ steps.version.outputs.version }}.zip . \
+            -x "*.git*" ".github/*" "dist/*" "node_modules/*" ".vscode/*" "*.md"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

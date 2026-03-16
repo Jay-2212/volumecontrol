@@ -239,6 +239,25 @@ function init() {
 
     new MutationObserver(mutations => {
         for (const m of mutations) {
+            // Clean up removed media elements to prevent memory leaks
+            for (const n of m.removedNodes) {
+                if (n.nodeType === 1) {
+                    if (n.tagName === 'AUDIO' || n.tagName === 'VIDEO') {
+                        if (n.__vc_source) {
+                            try { n.__vc_source.disconnect(); } catch (_) {}
+                            delete n.__vc_source;
+                        }
+                    } else if (n.querySelectorAll) {
+                        for (const el of n.querySelectorAll('audio, video')) {
+                            if (el.__vc_source) {
+                                try { el.__vc_source.disconnect(); } catch (_) {}
+                                delete el.__vc_source;
+                            }
+                        }
+                    }
+                }
+            }
+
             for (const n of m.addedNodes) {
                 if (n.nodeType === 1) {
                     if (n.tagName === 'AUDIO' || n.tagName === 'VIDEO') {
